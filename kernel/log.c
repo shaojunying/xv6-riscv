@@ -33,17 +33,24 @@
 // Contents of the header block, used for both the on-disk header block
 // and to keep track in memory of logged block# before commit.
 struct logheader {
+  // 0表示没有完成的事务，正数表示被修改的磁盘块个数
   int n;
+  // 长度为n数组，每个元素保存一个被修改磁盘块的blockno，其对应的磁盘块内容会被保存header block后blockno偏移的磁盘块中
   int block[LOGSIZE];
 };
 
 struct log {
+  //
   struct spinlock lock;
   int start;
   int size;
+  // File System正在执行的系统调用数量
   int outstanding; // how many FS sys calls are executing.
+  // File System是否正在提交日志信息
   int committing;  // in commit(), please wait.
+  // 此Log对应的dev信息
   int dev;
+  // 日志头信息
   struct logheader lh;
 };
 struct log log;
@@ -116,7 +123,9 @@ write_head(void)
 static void
 recover_from_log(void)
 {
+  // 读取log信息，包含header和后面的block
   read_head();
+  // 将log中的更新写入到磁盘中
   install_trans(1); // if committed, copy from log to disk
   log.lh.n = 0;
   write_head(); // clear the log
@@ -134,6 +143,8 @@ begin_op(void)
       // this op might exhaust log space; wait for commit.
       sleep(&log, &log.lock);
     } else {
+      // 预定了日志空间的进程个数（需要预留的总日志空间为outstanding * MAXOPBLOCKS）
+      // 递增outstanding的两个作用：1. 预定日志空间；2. 避免该系统调用执行过程中日志被提交。
       log.outstanding += 1;
       release(&log.lock);
       break;
@@ -143,15 +154,19 @@ begin_op(void)
 
 // called at the end of each FS system call.
 // commits if this was the last outstanding operation.
+// 在File System系统调用的末尾执行该函数
 void
 end_op(void)
 {
   int do_commit = 0;
 
   acquire(&log.lock);
+  // 正在使用log的系统调用-1
   log.outstanding -= 1;
+  // 系统已经在提交了，错误的状态
   if(log.committing)
     panic("log.committing");
+  // 没有系统调用还占用log，才能进行提交
   if(log.outstanding == 0){
     do_commit = 1;
     log.committing = 1;
@@ -159,15 +174,18 @@ end_op(void)
     // begin_op() may be waiting for log space,
     // and decrementing log.outstanding has decreased
     // the amount of reserved space.
+    // 还有其他系统调用正在操作log，释放锁，唤醒他们继续操作。
     wakeup(&log);
   }
   release(&log.lock);
 
+  // 需要执行提交操作
   if(do_commit){
     // call commit w/o holding locks, since not allowed
     // to sleep with locks.
     commit();
     acquire(&log.lock);
+    // 提交完成，唤醒等待log的进程
     log.committing = 0;
     wakeup(&log);
     release(&log.lock);
@@ -175,6 +193,7 @@ end_op(void)
 }
 
 // Copy modified blocks from cache to log.
+// 将被修改过的blocks从cache持久化到log中
 static void
 write_log(void)
 {
@@ -194,10 +213,15 @@ static void
 commit()
 {
   if (log.lh.n > 0) {
+    // 将修改的block拷贝到磁盘中的lock区域。
     write_log();     // Write modified blocks from cache to log
+    // 更新log header信息
     write_head();    // Write header to disk -- the real commit
+    // 将被修改的页面真正地拷贝到其对应的页面上
     install_trans(0); // Now install writes to home locations
+    // 拷贝完成，清空log对应的信息
     log.lh.n = 0;
+    // 将新的log header写入log block中
     write_head();    // Erase the transaction from the log
   }
 }
@@ -211,6 +235,7 @@ commit()
 //   modify bp->data[]
 //   log_write(bp)
 //   brelse(bp)
+// 
 void
 log_write(struct buf *b)
 {
@@ -226,8 +251,10 @@ log_write(struct buf *b)
     if (log.lh.block[i] == b->blockno)   // log absorption
       break;
   }
+  // 将b的block追加的数组中
   log.lh.block[i] = b->blockno;
-  if (i == log.lh.n) {  // Add new block to log?
+  if (i == log.lh.n) {  // Add new block to log? （之前没有出现过的日志号）
+    // 增加b的refcnt（避免Block Cache 逐出（evit）它）
     bpin(b);
     log.lh.n++;
   }

@@ -30,6 +30,7 @@ struct {
   // Linked list of all buffers, through prev/next.
   // Sorted by how recently the buffer was used.
   // head.next is most recent, head.prev is least.
+  // head存储最近使用的buf
   struct buf head;
 } bcache;
 
@@ -61,8 +62,8 @@ bget(uint dev, uint blockno)
   struct buf *b;
 
   acquire(&bcache.lock);
-
   // Is the block already cached?
+  // 从前（最近使用的）向后（最久未使用的）查找，看是否有str buf为目标buf，有的话直接返回
   for(b = bcache.head.next; b != &bcache.head; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
@@ -74,6 +75,7 @@ bget(uint dev, uint blockno)
 
   // Not cached.
   // Recycle the least recently used (LRU) unused buffer.
+  // 从后向前查找，为dev、blockno申请 最久未使用的buf
   for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
     if(b->refcnt == 0) {
       b->dev = dev;
@@ -93,10 +95,12 @@ struct buf*
 bread(uint dev, uint blockno)
 {
   struct buf *b;
-
+  // 从Buffer Cache中获取dev、blockno对应的struct buf
   b = bget(dev, blockno);
+  // struct buf是新申请的，需要从磁盘中读取信息。
   if(!b->valid) {
     virtio_disk_rw(b, 0);
+    // struct buf中的数据标记为有效的
     b->valid = 1;
   }
   return b;
